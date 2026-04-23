@@ -1,0 +1,96 @@
+#include "grid.hpp"
+#include "rules.hpp"
+#include <fstream>
+#include <iostream>
+
+Grid *load_grid(const char *filename) {
+    // TODO(Dário): ler ficheiro, alocar memoria e preencher Grid.
+    std::ifstream file(filename);
+    
+    if (!file.is_open()) 
+        std::cerr << "Error opening file: " << filename << std::endl;
+    int  L;
+    file >> L;
+    if(L < 2 || L > 9) {
+        std::cerr << "Invalid block size: " << L << std::endl;
+        return nullptr;
+    }
+    int n = L * L;
+    int **cells = new int*[n];
+    int *data = new int[n * n];
+    for (int i = 0; i < n; ++i) {
+        cells[i] = data + i * n;
+        for (int j = 0; j < n; ++j) {
+            if (!(file >> cells[i][j])) {
+                std::cerr << "Error reading cell value at (" << i << ", " << j << ")" << std::endl;
+                 for (int k = 0; k <= i; ++k) {
+                    delete[] cells[k];
+                }
+                delete[] cells;
+                delete[] data;
+                return nullptr;
+            }
+        }
+    }
+    
+    Grid *g = new Grid{n, L, cells, data};
+    for(int i = 0; i < n; ++i) {
+        for(int j = 0; j < n; ++j) {
+            if (cells[i][j] > 0 && !is_valid(g, i, j, cells[i][j])) {
+                std::cerr << "Não tem solução" << std::endl;
+                for (int k = 0; k < n; ++k) {
+                    delete[] cells[k];
+                }
+                delete[] cells;
+                delete[] data;
+                delete g;
+                return nullptr;
+            }
+        }
+    }
+    return g;
+}
+
+void free_grid(Grid *g) {
+    if (!g) return;
+    // Liberar o array de ponteiros
+    if (g->cells) {
+        delete[] g->cells;
+    }
+    // Liberar o bloco único de memória dos dados
+    if (g->data) {
+        delete[] g->data;
+    }
+    delete g;
+}
+
+int get_cell(Grid *g, int row, int col) {
+    // TODO(Dário): devolver valor da celula com validacao de limites.
+
+    if (row < 0 || row >= g->n || col < 0 || col >= g->n) {
+        std::cerr << "Invalid cell coordinates: (" << row << ", " << col << ")" << std::endl;
+        return -1;
+    }
+    return g->cells[row][col];
+}
+
+void set_cell(Grid *g, int row, int col, int value) {
+    // TODO(Dário): escrever valor na celula com validacao de limites.
+    if (row < 0 || row >= g->n || col < 0 || col >= g->n) {
+        std::cerr << "Invalid cell coordinates: (" << row << ", " << col << ")" << std::endl;
+        return;
+    }
+    g->cells[row][col] = value;
+
+}
+
+void print_grid(Grid *g) {
+    // TODO(Dário): imprimir tabuleiro em formato legivel.
+    std::cout << "Grid (n=" << g->n << ", L=" << g->L << "):" << std::endl;
+    for (int i = 0; i < g->n; ++i) {
+        for (int j = 0; j < g->n; ++j) {
+            std::cout << g->cells[i][j] << " ";
+        }
+        std::cout << std::endl;
+    }
+}

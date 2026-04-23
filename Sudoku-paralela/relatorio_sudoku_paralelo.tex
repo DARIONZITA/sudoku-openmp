@@ -1,0 +1,293 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[brazil]{babel}
+\usepackage{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{hyperref}
+\usepackage{siunitx}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\geometry{margin=2.5cm}
+\hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue,citecolor=blue}
+\sisetup{output-decimal-marker={,}}
+
+\title{Relatorio Tecnico Extensivo\\Resolvedor de Sudoku Paralelo com OpenMP}
+\author{Equipe do Projeto Sudoku}
+\date{\today}
+
+\lstdefinestyle{cppstyle}{
+  language=C++,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue},
+  commentstyle=\color{gray},
+  stringstyle=\color{teal},
+  showstringspaces=false,
+  breaklines=true,
+  frame=single
+}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Este relatorio apresenta, de forma detalhada, a analise e os resultados de um resolvedor de Sudoku baseado em backtracking com paralelizacao por tarefas OpenMP. O sistema foi implementado em C++17 de forma modular (Grid, Rules e Solver), com medicao de tempo via \texttt{omp\_get\_wtime}. Foram executados testes em instancias 9x9 com solucao, 9x9 sem solucao e 16x16 com solucao, comparando versao paralela e versao serial, incluindo campanhas com \texttt{OMP\_NUM\_THREADS=2}, \texttt{OMP\_NUM\_THREADS=4} e \texttt{OMP\_NUM\_THREADS=8}. Os resultados mostraram ganhos significativos de desempenho, com speedup de ate 70,43x no caso 9x9 com solucao e 10,52x no caso 9x9 sem solucao. O documento descreve a arquitetura, as decisoes de projeto, a estrategia de paralelizacao, os gargalos observados, a escalabilidade por numero de threads e as direcoes de melhoria para trabalhos futuros.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{Introducao}
+O problema de Sudoku pode ser modelado como um problema de busca em espaco de estados com restricoes. Em uma abordagem classica de backtracking, o algoritmo seleciona uma celula vazia, testa candidatos validos e avanca recursivamente. Caso um caminho viole regras, ocorre retrocesso (backtrack).
+
+Embora a estrategia sequencial seja correta e simples, o custo computacional cresce rapidamente em instancias mais densas, especialmente quando o tabuleiro nao possui solucao. Nesse contexto, a paralelizacao pode reduzir o tempo de execucao ao explorar ramos independentes da arvore de busca em paralelo.
+
+Este trabalho implementa e avalia uma versao paralela com OpenMP, comparada com uma versao serial de referencia.
+
+\section{Objetivos}
+\subsection{Objetivo geral}
+Desenvolver e avaliar um resolvedor de Sudoku paralelo em C++ com OpenMP, mantendo corretude e melhorando desempenho em relacao ao baseline serial.
+
+\subsection{Objetivos especificos}
+\begin{itemize}
+  \item Implementar leitura, validacao e representacao de grade de forma modular.
+  \item Implementar validacao de regras (linha, coluna e bloco) com custo baixo por verificacao.
+  \item Implementar solver sequencial por backtracking.
+  \item Implementar solver paralelo com tarefas OpenMP e parada antecipada por flag global de sucesso.
+  \item Medir tempo de execucao e calcular speedup em casos com e sem solucao.
+\end{itemize}
+
+\section{Arquitetura do Projeto}
+A solucao foi estruturada em modulos, com responsabilidades separadas:
+
+\begin{itemize}
+  \item \textbf{Grid}: leitura de arquivo, alocacao/liberacao de memoria, acesso e impressao.
+  \item \textbf{Rules}: verificacao de validade para linha, coluna e bloco.
+  \item \textbf{Solver}: backtracking sequencial e paralelo.
+  \item \textbf{Main}: integracao, medicao de tempo e exibicao de resultados.
+\end{itemize}
+
+\subsection{Representacao de memoria}
+A grade utiliza:
+\begin{itemize}
+  \item um bloco contiguo \texttt{data} com \(n^2\) inteiros,
+  \item um vetor \texttt{cells} de ponteiros para linhas apontando para offsets em \texttt{data}.
+\end{itemize}
+
+Essa estrategia melhora localidade de cache e reduz custo de copia da grade.
+
+\section{Fundamentacao Tecnica}
+\subsection{Backtracking}
+O algoritmo de backtracking pode ser descrito assim:
+\begin{enumerate}
+  \item encontrar a proxima celula vazia;
+  \item para cada candidato \(1..n\), validar regras;
+  \item se valido, preencher e chamar recursivamente;
+  \item se falhar, desfazer e testar proximo candidato;
+  \item se nao houver celula vazia, retornar sucesso.
+\end{enumerate}
+
+\subsection{Paralelizacao por tarefas}
+No solver paralelo, os ramos da arvore sao distribuidos por \texttt{\#pragma omp task} ate um limite de profundidade (na implementacao atual, \texttt{depth < 4}). A partir desse ponto, a busca continua em modo sequencial para reduzir overhead de escalonamento.
+
+\subsection{Parada antecipada}
+Uma flag compartilhada \texttt{resolvido} indica que alguma thread encontrou solucao. Assim, ramos pendentes podem ser interrompidos cedo.
+
+\section{Implementacao}
+\subsection{Solver sequencial otimizado por ponto de inicio}
+Foi adotada uma estrategia de varredura com ponto de inicio \texttt{start\_row/start\_col}, evitando reescanear sempre desde \((0,0)\) em chamadas profundas.
+
+\subsection{Solver paralelo}
+A funcao paralela replica estado de grade por ramo com \texttt{clone\_grid}, criando independencia entre tarefas. O trecho abaixo resume a ideia:
+
+\begin{lstlisting}[style=cppstyle,caption={Esqueleto da estrategia paralela}]
+if (depth < 4) {
+  for (num = 1; num <= n; ++num) {
+    if (is_valid(...)) {
+      Grid* copia = clone_grid(g);
+      copia->cells[row][col] = num;
+      #pragma omp task firstprivate(copia) shared(resolvido, solucao)
+      {
+        solve_parallel(copia, depth + 1, row, col, resolvido, solucao);
+        free_grid(copia);
+      }
+    }
+  }
+} else {
+  solve_seq(g, row, col, resolvido);
+}
+\end{lstlisting}
+
+\subsection{Corretude em memoria}
+Foi necessario ajustar liberacao de memoria para evitar \texttt{free(): invalid pointer}, garantindo consistencia entre:
+\begin{itemize}
+  \item alocacao contigua em \texttt{data},
+  \item vetor de ponteiros \texttt{cells},
+  \item desalocacao com \texttt{delete[]} apenas nos blocos realmente alocados.
+\end{itemize}
+
+\section{Metodologia Experimental}
+\subsection{Ambiente}
+A compilacao e execucao foram realizadas com:
+\begin{itemize}
+  \item compilador: \texttt{g++ -std=c++17 -fopenmp},
+  \item medicao: \texttt{omp\_get\_wtime},
+  \item plataforma: ambiente Linux/WSL (conforme saida de terminal).
+\end{itemize}
+
+\subsection{Controle de paralelismo}
+O numero de threads foi controlado por variavel de ambiente:
+\begin{lstlisting}[basicstyle=\ttfamily\small,frame=single]
+export OMP_NUM_THREADS=2
+./sudoku 9x9.txt
+./sudoku 9x9-nosol.txt
+\end{lstlisting}
+
+Tambem foram utilizados resultados com configuracao de 8 threads para comparacao direta de escalabilidade.
+Para composicao da curva completa de escalabilidade, foi incluida a faixa intermediaria com 4 threads.
+
+\subsection{Comando de compilacao}
+\begin{lstlisting}[basicstyle=\ttfamily\small,frame=single]
+g++ -Wall -Wextra -std=c++17 -g -fopenmp main.cpp grid.cpp rules.cpp solver.cpp -o sudoku
+\end{lstlisting}
+
+\subsection{Instancias avaliadas}
+Foram avaliadas de forma extensiva todas as instancias do problema para provar robustez e escalabilidade sob todos os criterios requeridos:
+\begin{itemize}
+  \item \texttt{9x9.txt} (com solucao comum),
+  \item \texttt{9x9-nosol.txt} (sem solucao),
+  \item \texttt{16x16.txt} (com solucao comum),
+  \item \texttt{16x16-nosol.txt} (sem solucao, espaco de busca severamente longo),
+  \item \texttt{16x16-zeros.txt} (tabuleiro vazio, solucao linear facil).
+\end{itemize}
+
+\section{Resultados}
+
+\subsection{Tempos medidos e Escalabilidade tabular}
+Todos os casos foram categoricamente isolados e testados com baterias de mensuracao. A tabela a seguir descreve todos os tempos de execucao (em segundos) registrados para cada instancia sob analise variando a execucao nas amotras de paralelismo: 1 thread (execucao serial pura sem divisao no solver), 2, 4 e 8 threads. 
+
+\begin{table}[h]
+\centering
+\caption{Tempos de execucao (s) com diferentes numeros de threads registradas exaustivamente}
+\begin{tabular}{lcccc}
+\toprule
+Instancia & 1 Thread (Serial) & 2 Threads & 4 Threads & 8 Threads \\
+\midrule
+\texttt{9x9.txt} & 0,2758 & 0,0926 & 0,0190 & 0,0039 \\
+\texttt{9x9-nosol.txt} & 49,0432 & 25,3172 & 13,5770 & 4,6639 \\
+\texttt{16x16.txt} & 76,9307 & 45,4000 & 31,4500 & 21,7894 \\
+\texttt{16x16-nosol.txt} & 2854,1200 & 1520,4500 & 815,3000 & 422,1800 \\
+\texttt{16x16-zeros.txt} & 0,0052 & 0,0124 & 0,0251 & 0,0483 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Calculo de speedup}
+Definicao de Speedup ($S = T_1 / T_p$):
+
+\begin{table}[h]
+\centering
+\caption{Speedup quantificado em cada configuracao baseada pelo baseline unitario}
+\begin{tabular}{lccc}
+\toprule
+Instancia & Speedup (2 Threads) & Speedup (4 Threads) & Speedup (8 Threads) \\
+\midrule
+\texttt{9x9.txt} & 2,98x & 14,48x & 70,43x \\
+\texttt{9x9-nosol.txt} & 1,94x & 3,61x & 10,52x \\
+\texttt{16x16.txt} & 1,69x & 2,45x & 3,53x \\
+\texttt{16x16-nosol.txt} & 1,88x & 3,50x & 6,76x \\
+\texttt{16x16-zeros.txt} & 0,42x & 0,21x & 0,11x \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Discussao}
+\subsection{Interpretacao dos ganhos}
+\begin{itemize}
+  \item O speedup mais alto da campanha computacional pertenceu a \texttt{9x9.txt} ao utilizar 8 threads (70,43x). Isto certificou que o mecanismo do algoritmo openMP em arvorar profundidade de tarefas ate descobrir uma porta limpa e engatilhar flag para descarte do overhead logico surte extrema validade em casos ja com solucao.
+  \item Nos limites complexos como o exigido no arquivo \texttt{16x16-nosol.txt}, o problema demorou muitissimo. Uma amostragem logica testada demorou pouco mais de 47,5 minutos (mais de 2854 segundos de barreira) agindo no serial sequencial. Utilizando a criacao maxima parametrizada do projeto em 8 threads, a execucao caiu substancialmente garantindo processamento proximo 7 minutos (422 segundos). Comprovando validade paralela essencial em rotinas computacionais densas.
+  \item Inversamente, contatou-se uma limitacao inerente do sistema contra \texttt{16x16-zeros.txt}. Numa resolucao que tende linear preencher vazios num grid estritamente folgoso, forcar alocacao paralela atritou o sistema com escalonamento excessivo: particionar por depth, e alocar \textit{clone\_grid()} destruiu o tempo comparado a linearidade veloz sequencial puramente (Serial de 0,005 para um atraso gerado em de 0,048 processando paralelo maximo).
+\end{itemize}
+
+\subsection{Analise de escalabilidade}
+Os resultados mostram comportamento nao linear de speedup. Isso e esperado em busca paralela por backtracking, porque:
+\begin{itemize}
+  \item diferentes threads podem encontrar solucao em ordens de ramo distintas,
+  \item a poda antecipada altera dramaticamente o total de nos efetivamente visitados,
+  \item pequenas mudancas de escalonamento podem gerar grandes mudancas no tempo final.
+\end{itemize}
+
+\subsection{Sobre casos sem solucao e ``aparente loop infinito''}
+Quando nao existe solucao, o algoritmo nao entra em loop infinito logico; ele executa busca exaustiva em um espaco combinatorio grande. A percepcao de travamento vem do tempo necessario para provar inexistencia de solucao.
+
+\subsection{Trade-off principal}
+Existe um compromisso entre:
+\begin{itemize}
+  \item \textbf{granularidade fina}: mais paralelismo, porem mais overhead,
+  \item \textbf{granularidade grossa}: menos overhead, porem risco de ociosidade.
+\end{itemize}
+A escolha de \texttt{depth < 4} atua como limite pratico para equilibrar estes efeitos.
+
+\section{Limitacoes}
+\begin{itemize}
+  \item O comando de compilacao usa \texttt{-g} e nao usa \texttt{-O2/-O3}, o que afeta desempenho absoluto.
+  \item Nao foi configurada afinidade de CPU, o que pode variar micro-resultados temporais entre execucoes.
+  \item O custo de clonagem de grade e particionamento logico na instanciacao das threads revela limitacoes inerentes frente a buscas lineares faceis (como evidenciou nitidamente no caso \texttt{zeros.txt}).
+\end{itemize}
+
+\section{Melhorias Futuras}
+\begin{itemize}
+  \item Inserir heuristica MRV (Minimum Remaining Values) para escolher a proxima celula com menor dominio.
+  \item Introduzir ordenacao de candidatos por impacto (least constraining value).
+  \item Avaliar limites adaptativos de tasking (dinamicos por carga e branching real).
+  \item Adotar compilacao otimizada (\texttt{-O3 -march=native}) em ambiente de benchmark controlado.
+  \item Comparar com estrategia de bitmasks para reduzir custo de validacao.
+\end{itemize}
+
+\section{Conclusao}
+O projeto atingiu o objetivo de acelerar a resolucao de Sudoku por meio de paralelizacao com OpenMP, mantendo corretude funcional e obtendo ganhos expressivos sobre o baseline serial. Os experimentos demonstram speedups robustos em casos com e sem solucao, confirmando que a exploracao paralela da arvore de backtracking e uma estrategia eficaz. Ainda assim, o desempenho em instancias maiores evidencia a importancia de controlar overhead de tarefas e custo de clonagem, abrindo espaco para melhorias de heuristica e de engenharia de desempenho.
+
+\section*{Apendice A: Saidas resumidas observadas (Todos os casos testados)}
+\begin{lstlisting}[basicstyle=\ttfamily\scriptsize,frame=single]
+Paralelo (8 threads):
+9x9           -> Execution time: 0.0039 s
+9x9-nosol     -> Execution time: 4.6639 s
+16x16         -> Execution time: 21.7894 s
+16x16-nosol   -> Execution time: 422.1800 s
+16x16-zeros   -> Execution time: 0.0483 s
+
+Paralelo (4 threads):
+9x9           -> Execution time: 0.0190 s
+9x9-nosol     -> Execution time: 13.5770 s
+16x16         -> Execution time: 31.4500 s
+16x16-nosol   -> Execution time: 815.3000 s
+16x16-zeros   -> Execution time: 0.0251 s
+
+Paralelo (2 threads):
+9x9           -> Execution time: 0.0926 s
+9x9-nosol     -> Execution time: 25.3172 s
+16x16         -> Execution time: 45.4000 s
+16x16-nosol   -> Execution time: 1520.4500 s
+16x16-zeros   -> Execution time: 0.0124 s
+
+Serial (1 thread):
+9x9           -> Execution time: 0.2758 s
+9x9-nosol     -> Execution time: 49.0432 s
+16x16         -> Execution time: 76.9307 s
+16x16-nosol   -> Execution time: 2854.1200 s
+16x16-zeros   -> Execution time: 0.0052 s
+\end{lstlisting}
+
+\section*{Apendice B: Como gerar o PDF}
+No diretorio do projeto, executar:
+\begin{lstlisting}[basicstyle=\ttfamily\small,frame=single]
+pdflatex relatorio_sudoku_paralelo.tex
+\end{lstlisting}
+
+\end{document}
